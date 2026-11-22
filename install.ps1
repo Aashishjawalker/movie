@@ -19,31 +19,66 @@ Write-Host @"
 
 Write-Host "Installing movie CLI..." -ForegroundColor White
 
+# Helper to verify if an executable is actually working Python (filters out WindowsApps fake shim)
+function Test-PythonWorks($path) {
+    if (-not $path) { return $false }
+    try {
+        $pinfo = New-Object System.Diagnostics.ProcessStartInfo
+        $pinfo.FileName = $path
+        $pinfo.Arguments = "-c `"import sys`""
+        $pinfo.RedirectStandardOutput = $true
+        $pinfo.RedirectStandardError = $true
+        $pinfo.UseShellExecute = $false
+        $pinfo.CreateNoWindow = $true
+        $p = [System.Diagnostics.Process]::Start($pinfo)
+        $finished = $p.WaitForExit(4000)
+        if ($finished -and $p.ExitCode -eq 0) {
+            return $true
+        }
+    } catch {
+        return $false
+    }
+    return $false
+}
+
 # Helper function to find Python across known paths and PATH
 function Find-PythonExecutable {
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $cmd) { $cmd = Get-Command python3 -ErrorAction SilentlyContinue }
-    if (-not $cmd) { $cmd = Get-Command py -ErrorAction SilentlyContinue }
-    if (-not $cmd) {
-        $KnownPaths = @(
-            "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
-            "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
-            "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe",
-            "C:\Python312\python.exe",
-            "C:\Python311\python.exe",
-            "C:\Program Files\Python312\python.exe",
-            "C:\Program Files\Python311\python.exe"
-        )
-        foreach ($p in $KnownPaths) {
-            if (Test-Path $p) {
+    # 1. Check known direct install paths first
+    $KnownPaths = @(
+        "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe",
+        "C:\Python312\python.exe",
+        "C:\Python311\python.exe",
+        "C:\Program Files\Python312\python.exe",
+        "C:\Program Files\Python311\python.exe"
+    )
+    foreach ($p in $KnownPaths) {
+        if (Test-Path $p) {
+            if (Test-PythonWorks $p) {
                 $dir = Split-Path $p
                 $env:Path = "$dir;$dir\Scripts;$env:Path"
                 return $p
             }
         }
-    } else {
-        return $cmd.Source
     }
+
+    # 2. Check py launcher
+    $py = Get-Command py -ErrorAction SilentlyContinue
+    if ($py -and (Test-PythonWorks $py.Source)) {
+        return $py.Source
+    }
+
+    # 3. Check python / python3 in PATH, ignoring dummy WindowsApps 0-byte stubs
+    $cmds = Get-Command python, python3 -All -ErrorAction SilentlyContinue
+    if ($cmds) {
+        foreach ($c in $cmds) {
+            if ($c.Source -notlike "*Microsoft\WindowsApps*" -and (Test-PythonWorks $c.Source)) {
+                return $c.Source
+            }
+        }
+    }
+
     return $null
 }
 
@@ -55,19 +90,24 @@ if (-not $PythonPath) {
     Write-Host "==> Python 3 was not found. Installing Python 3 automatically..." -ForegroundColor Yellow
     
     $Winget = Get-Command winget -ErrorAction SilentlyContinue
+    $Installed = $false
     if ($Winget) {
-        Write-Host "==> Installing Python 3.12 via Windows Package Manager..." -ForegroundColor Cyan
-        Start-Process -FilePath "winget" -ArgumentList "install Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent" -Wait -NoNewWindow
-    } else {
+        Write-Host "==> Installing Python 3.12 via Windows Package Manager (please wait)..." -ForegroundColor Cyan
+        $proc = Start-Process -FilePath "winget" -ArgumentList "install Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent" -Wait -PassThru -NoNewWindow
+        if ($proc.ExitCode -eq 0) { $Installed = $true }
+    }
+    
+    if (-not $Installed) {
         Write-Host "==> Downloading official Python 3 installer from python.org..." -ForegroundColor Cyan
         $TempInstaller = Join-Path $env:TEMP "python-installer.exe"
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri "https://www.python.org/ftp/python/3.12.3/python-3.12.3-amd64.exe" -OutFile $TempInstaller
         Write-Host "==> Installing Python silently..." -ForegroundColor Cyan
         Start-Process -FilePath $TempInstaller -ArgumentList "/quiet InstallAllUsers=0 PrependPath=1 Include_test=0" -Wait
         Remove-Item $TempInstaller -Force -ErrorAction SilentlyContinue
     }
 
-    # Refresh PATH environment variable in current process
+    # Refresh PATH environment variable in current process from Registry
     $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $MachinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $env:Path = "$UserPath;$MachinePath;$env:Path"
