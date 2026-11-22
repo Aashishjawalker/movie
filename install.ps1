@@ -30,6 +30,10 @@ if (-not $PythonCmd) {
     Exit 1
 }
 
+# Ensure curses is available on Windows
+Write-Host "==> Checking Windows dependencies..." -ForegroundColor Cyan
+& $PythonCmd.Source -m pip install --quiet windows-curses 2>$null
+
 # 2. Destination folders
 $InstallDir = Join-Path $env:USERPROFILE ".local\share\movie"
 $BinDir = Join-Path $env:USERPROFILE ".local\bin"
