@@ -31,16 +31,28 @@ echo -e "${RESET}"
 echo -e "${BOLD}Installing movie CLI...${RESET}"
 echo
 
-# 1. Check for Python 3
+# 1. Check for Python 3; auto-install if missing
 if ! command -v python3 >/dev/null 2>&1; then
-    echo -e "${RED}[ERROR] python3 is not installed.${RESET}"
-    if [ -d "/data/data/com.termux" ]; then
-        echo -e "On Termux, run: ${YELLOW}pkg install python${RESET}"
-    elif command -v apt >/dev/null 2>&1; then
-        echo -e "On Debian/Ubuntu, run: ${YELLOW}sudo apt update && sudo apt install python3${RESET}"
+    echo -e "${YELLOW}==> Python 3 not found. Installing automatically...${RESET}"
+    if [ -d "/data/data/com.termux" ] || [ -n "$PREFIX" ]; then
+        pkg update -y && pkg install -y python
+    elif command -v apt-get >/dev/null 2>&1; then
+        if [ "$(id -u)" -eq 0 ]; then
+            apt-get update && apt-get install -y python3 python3-pip
+        else
+            sudo apt-get update && sudo apt-get install -y python3 python3-pip
+        fi
     elif command -v brew >/dev/null 2>&1; then
-        echo -e "On macOS, run: ${YELLOW}brew install python3${RESET}"
+        brew install python3
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y python3
+    elif command -v pacman >/dev/null 2>&1; then
+        sudo pacman -Sy --noconfirm python
     fi
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo -e "${RED}[ERROR] Could not automatically install python3.${RESET}"
     exit 1
 fi
 
