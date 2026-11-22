@@ -23,6 +23,9 @@ $PythonCmd = Get-Command python -ErrorAction SilentlyContinue
 if (-not $PythonCmd) {
     $PythonCmd = Get-Command python3 -ErrorAction SilentlyContinue
 }
+if (-not $PythonCmd) {
+    $PythonCmd = Get-Command py -ErrorAction SilentlyContinue
+}
 
 if (-not $PythonCmd) {
     Write-Host "[ERROR] Python 3 is not installed or not in your PATH." -ForegroundColor Red
