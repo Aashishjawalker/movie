@@ -7,7 +7,8 @@ stream is re-served from 127.0.0.1 by a detached process.
 import http.client
 import http.server
 import os
-import select
+import queue
+import shutil
 import socketserver
 import subprocess
 import sys
@@ -230,25 +231,60 @@ def serve_stream(url, mode, idle=1800, referer=STREAM_REFERER):
         pass
 
 
+def _read_pipe_line(pipe, timeout=8):
+    """Read a line from pipe with timeout without select (cross-platform for Windows, Linux, Mac, Android)."""
+    q = queue.Queue()
+
+    def reader():
+        try:
+            line = pipe.readline()
+            q.put((line, None))
+        except Exception as exc:
+            q.put((None, exc))
+
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+    try:
+        line, exc = q.get(timeout=timeout)
+        if exc:
+            raise exc
+        return line
+    except queue.Empty:
+        return None
+
+
 def start_proxy(url, mode, referer=STREAM_REFERER, entry=None):
     """Spawn a detached proxy process and return its port."""
     entry = entry or os.path.join(os.path.dirname(os.path.abspath(__file__)), "movie.py")
     cmd = [sys.executable, entry, "--serve", url, "--mode", mode]
     if referer and referer != STREAM_REFERER:
         cmd += ["--referer", referer]
+
+    kwargs = {}
+    if sys.platform == "win32":
+        flags = 0
+        if hasattr(subprocess, "CREATE_NO_WINDOW"):
+            flags |= subprocess.CREATE_NO_WINDOW
+        if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+            flags |= subprocess.CREATE_NEW_PROCESS_GROUP
+        if flags:
+            kwargs["creationflags"] = flags
+    else:
+        kwargs["start_new_session"] = True
+
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
-        start_new_session=True,
+        **kwargs,
     )
-    ready, _, _ = select.select([proc.stdout], [], [], 8)
-    if not ready:
+    line = _read_pipe_line(proc.stdout, timeout=8)
+    proc.stdout.close()
+    if not line:
         proc.kill()
         raise RuntimeError("proxy did not start")
-    line = (proc.stdout.readline() or "").strip()
-    proc.stdout.close()
+    line = line.strip()
     if not line.startswith("PORT "):
         proc.kill()
         raise RuntimeError("proxy failed: " + (line or "no output"))
@@ -256,7 +292,7 @@ def start_proxy(url, mode, referer=STREAM_REFERER, entry=None):
 
 
 # --------------------------------------------------------------------------- #
-# android intents
+# intents and player launchers
 # --------------------------------------------------------------------------- #
 def _am(args, timeout=30):
     env = os.environ.copy()
@@ -298,54 +334,106 @@ def open_chooser(url, mime="video/mp4"):
     )
 
 
-def launch_url(url, player, mime="video/mp4"):
-    pkg = (player or {}).get("pkg")
-    if pkg:
-        proc = _am(
-            [
-                "start", "--user", "0",
-                "-a", "android.intent.action.VIEW",
-                "-d", url,
-                "-t", mime,
-                "-p", pkg,
-            ]
-        )
-    else:
-        proc = open_chooser(url, mime)
-    return _check(proc)
+def launch_url(url, player=None, mime="video/mp4"):
+    if on_android():
+        pkg = (player or {}).get("pkg")
+        if pkg:
+            proc = _am(
+                [
+                    "start", "--user", "0",
+                    "-a", "android.intent.action.VIEW",
+                    "-d", url,
+                    "-t", mime,
+                    "-p", pkg,
+                ]
+            )
+        else:
+            proc = open_chooser(url, mime)
+        return _check(proc)
+
+    # Desktop: Windows, macOS, Linux / Ubuntu
+    player_name = ((player or {}).get("name") or "").lower()
+    candidates = []
+    if "vlc" in player_name or not player_name:
+        candidates.append("vlc")
+    if "mpv" in player_name or not player_name:
+        candidates.append("mpv")
+
+    for app in candidates:
+        bin_path = shutil.which(app)
+        if bin_path:
+            subprocess.Popen([bin_path, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return ""
+
+    if sys.platform == "win32":
+        try:
+            os.startfile(url)
+            return ""
+        except Exception:
+            import webbrowser
+            webbrowser.open(url)
+            return ""
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return ""
+    elif shutil.which("xdg-open"):
+        subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return ""
+
+    import webbrowser
+    webbrowser.open(url)
+    return ""
 
 
 def open_in_browser(url):
-    if not on_android():
-        raise RuntimeError("no browser here")
-    proc = _am(
-        ["start", "--user", "0", "-a", "android.intent.action.VIEW", "-d", url]
-    )
-    return _check(proc)
+    if on_android():
+        proc = _am(
+            ["start", "--user", "0", "-a", "android.intent.action.VIEW", "-d", url]
+        )
+        return _check(proc)
+    import webbrowser
+    webbrowser.open(url)
+    return ""
 
 
 def open_magnet(magnet):
     """Hand a magnet to whichever torrent app is installed."""
-    if not on_android():
-        raise RuntimeError("no torrent app here")
-    proc = _am(
-        [
-            "start", "--user", "0",
-            "-a", "android.intent.action.VIEW",
-            "-d", magnet,
-            "-t", "application/x-bittorrent",
-        ]
-    )
-    return _check(proc)
+    if on_android():
+        proc = _am(
+            [
+                "start", "--user", "0",
+                "-a", "android.intent.action.VIEW",
+                "-d", magnet,
+                "-t", "application/x-bittorrent",
+            ]
+        )
+        return _check(proc)
+
+    if sys.platform == "win32":
+        try:
+            os.startfile(magnet)
+            return ""
+        except Exception:
+            pass
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", magnet], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return ""
+    elif shutil.which("xdg-open"):
+        subprocess.Popen(["xdg-open", magnet], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return ""
+
+    raise RuntimeError("no default torrent app found")
 
 
-def play_file(path, player):
+def play_file(path, player=None):
     """Open a finished download with the chosen player."""
-    url = "file://" + urllib.parse.quote(path)
-    return launch_url(url, player)
+    if on_android():
+        url = "file://" + urllib.parse.quote(path)
+        return launch_url(url, player)
+    return launch_url(path, player)
 
 
-def play_stream(url, player, referer=STREAM_REFERER):
+def play_stream(url, player=None, referer=STREAM_REFERER):
     """Probe, proxy and launch. Returns the local link."""
     mode, status = probe(url, referer)
     if not mode:
