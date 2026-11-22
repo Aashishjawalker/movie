@@ -156,6 +156,12 @@ Remove-Item -Path $TempExtract -Recurse -Force -ErrorAction SilentlyContinue
 $CmdLauncher = Join-Path $BinDir "movie.cmd"
 "@echo off`r`n`"$PythonPath`" `"$InstallDir\movie.py`" %*" | Out-File -FilePath $CmdLauncher -Encoding ascii -Force
 
+# Also place movie.cmd in the Python directory (which is already in PATH) so it works instantly without restart
+$PyDir = Split-Path $PythonPath
+if ($PyDir -and (Test-Path $PyDir)) {
+    Copy-Item -Path $CmdLauncher -Destination (Join-Path $PyDir "movie.cmd") -Force -ErrorAction SilentlyContinue
+}
+
 # 5. Ensure $BinDir is in User PATH
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($UserPath -notlike "*$BinDir*") {
